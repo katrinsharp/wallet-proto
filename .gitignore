@@ -1,0 +1,47 @@
+*.localfile
+.vagrant
+.blockade
+
+# sbt
+lib_managed
+project/project
+target
+native
+# Worksheets (Eclipse or IntelliJ)
+*.sc
+
+# Eclipse
+.cache*
+.classpath
+.project
+.scala_dependencies
+.settings
+.target
+.worksheet
+
+# IntelliJ
+.idea
+
+# ENSIME
+.ensime
+.ensime_lucene
+.ensime_cache
+
+# Mac
+.DS_Store
+
+# Akka Persistence
+journal
+snapshots
+
+# Log files
+*.log
+
+# activator
+RUNNING_PID
+project/.sbtserver
+project/.sbtserver.lock
+
+server.rb
+
+docker/public/files
