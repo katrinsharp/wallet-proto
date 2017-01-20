@@ -1,1 +1,1 @@
-# wallet-proto
+# Proto
