@@ -1,6 +1,7 @@
 package sample.queue
 
 import java.io.File
+import java.util.UUID
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.cluster.Cluster
@@ -49,15 +50,18 @@ class AccountActorSpec
   class TestAccountVerification extends AccountVerificationT {
 
     override def getCreditCheck(name: String, lastName: String): Future[Try[CreditScore]] = {
-      if (lastName.contains("highScore")) Future.successful(Success(CreditScore(200)))
+      if (lastName.contains("lowScore")) Future.successful(Success(CreditScore(10)))
       else if(lastName.contains("errorScore")) Future.successful(Failure(new Exception("You broke buddy")))
-      else Future.successful(Success(CreditScore(10)))
+      else Future.successful(Success(CreditScore(200)))
     }
   }
 
+  def generateTransactionId: TransactionId = UUID.randomUUID().toString
+
   val accountRegion: ActorRef = ClusterSharding(system).start(
     typeName = shardName,
-    entityProps = Props(classOf[AccountActor], new TestAccountVerification),
+    entityProps =
+      Props(classOf[AccountActor], new TestAccountVerification, new ClusterAccountActorProvider),
     settings = ClusterShardingSettings(system),
     extractEntityId = extractEntityId,
     extractShardId = extractShardId)
@@ -65,22 +69,22 @@ class AccountActorSpec
   "AccountActor with high credit score" should {
 
     val accNumber = "1234"
-    val accountDetails = BasicAccountDetails(accNumber, "Big", "Lebowski-highScore")
+    val accountDetails = BasicAccountDetails(accNumber, "Big", "Lebowski")
 
     "fail to increase balance if account doesn't exist yet" in {
 
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(accNumber, 1), test.ref)
+      accountRegion.tell(IncreaseBalance(accNumber, 1, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("invalid command") === true
       }
     }
 
-    "successfully acknowledged of `create account` request" in {
+    "successfully acknowledge a `create account` request" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateAccount(accountDetails), test.ref)
-      test.expectMsgPF() { case Success(msg: AccountCreationRequestAcknowledged) =>
+      test.expectMsgPF() { case msg: AccountCreationRequestAcknowledged =>
         msg.accountDetails.accNumber === accNumber
       }
     }
@@ -89,8 +93,8 @@ class AccountActorSpec
 
       val increase = 10
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(accNumber, increase), test.ref)
-      test.expectMsgPF() { case Success(msg: BalanceIncreased) =>
+      accountRegion.tell(IncreaseBalance(accNumber, increase, generateTransactionId), test.ref)
+      test.expectMsgPF() { case msg: BalanceIncreased =>
         msg.amount === increase
       }
     }
@@ -99,8 +103,8 @@ class AccountActorSpec
 
       val decrease = 8
       val test = TestProbe()
-      accountRegion.tell(DecreaseBalance(accNumber, decrease), test.ref)
-      test.expectMsgPF() { case Success(msg: BalanceDecreased) =>
+      accountRegion.tell(DecreaseBalance(accNumber, decrease, generateTransactionId), test.ref)
+      test.expectMsgPF() { case msg: BalanceDecreased =>
         msg.amount === decrease
       }
     }
@@ -109,7 +113,7 @@ class AccountActorSpec
 
       val decrease = 3
       val test = TestProbe()
-      accountRegion.tell(DecreaseBalance(accNumber, decrease), test.ref)
+      accountRegion.tell(DecreaseBalance(accNumber, decrease, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("insufficient funds") === true
       }
@@ -119,7 +123,7 @@ class AccountActorSpec
 
       val test = TestProbe()
       accountRegion.tell(GetCurrentBalance(accNumber), test.ref)
-      test.expectMsgPF() { case Success(balance) =>
+      test.expectMsgPF() { case balance =>
         balance === 2
       }
     }
@@ -137,7 +141,7 @@ class AccountActorSpec
 
       val increase = -1
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(accNumber, increase), test.ref)
+      accountRegion.tell(IncreaseBalance(accNumber, increase, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("negative amount") === true
       }
@@ -147,7 +151,7 @@ class AccountActorSpec
 
       val increase = -1
       val test = TestProbe()
-      accountRegion.tell(DecreaseBalance(accNumber, increase), test.ref)
+      accountRegion.tell(DecreaseBalance(accNumber, increase, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("negative amount") === true
       }
@@ -184,7 +188,7 @@ class AccountActorSpec
       system.eventStream.subscribe(
         test.ref,
         classOf[AccountTakeSnapshotEvent])
-      (1 to 100).foreach(accountRegion ! IncreaseBalance(accNumber, _))
+      (1 to 100).foreach(accountRegion ! IncreaseBalance(accNumber, _, generateTransactionId))
       test.expectMsgType[AccountTakeSnapshotEvent](6.seconds)
     }
   }
@@ -192,22 +196,22 @@ class AccountActorSpec
   "AccountActor with low credit score" should {
 
     val accNumber = "5678"
-    val accountDetails = BasicAccountDetails(accNumber, "Harry", "Potter")
+    val accountDetails = BasicAccountDetails(accNumber, "Harry", "Potter-lowScore")
 
     "fail to increase balance if account doesn't exist yet" in {
 
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(accNumber, 1), test.ref)
+      accountRegion.tell(IncreaseBalance(accNumber, 1, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("invalid command") === true
       }
     }
 
-    "successfully acknowledged of `create account` request" in {
+    "successfully acknowledge a `create account` request" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateAccount(accountDetails), test.ref)
-      test.expectMsgPF() { case Success(msg: AccountCreationRequestAcknowledged) =>
+      test.expectMsgPF() { case msg: AccountCreationRequestAcknowledged =>
         msg.accountDetails.accNumber === accNumber
       }
     }
@@ -216,7 +220,7 @@ class AccountActorSpec
 
       val increase = 10
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(accNumber, increase), test.ref)
+      accountRegion.tell(IncreaseBalance(accNumber, increase, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("low score") === true
       }
@@ -226,14 +230,14 @@ class AccountActorSpec
 
       val decrease = 8
       val test = TestProbe()
-      accountRegion.tell(DecreaseBalance(accNumber, decrease), test.ref)
+      accountRegion.tell(DecreaseBalance(accNumber, decrease, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("low score") === true
       }
     }
 
 
-    "fail to get current balance due ot inacitve account" in {
+    "fail to get current balance due to inactive account" in {
 
       val test = TestProbe()
       accountRegion.tell(GetCurrentBalance(accNumber), test.ref)
@@ -260,17 +264,17 @@ class AccountActorSpec
     "fail to increase balance if account doesn't exist yet" in {
 
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(accNumber, 1), test.ref)
+      accountRegion.tell(IncreaseBalance(accNumber, 1, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("invalid command") === true
       }
     }
 
-    "successfully acknowledged of `create account` request" in {
+    "successfully acknowledge a `create account` request" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateAccount(accountDetails), test.ref)
-      test.expectMsgPF() { case Success(msg: AccountCreationRequestAcknowledged) =>
+      test.expectMsgPF() { case msg: AccountCreationRequestAcknowledged =>
         msg.accountDetails.accNumber === accNumber
       }
     }
@@ -279,7 +283,7 @@ class AccountActorSpec
 
       val increase = 10
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(accNumber, increase), test.ref)
+      accountRegion.tell(IncreaseBalance(accNumber, increase, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("you broke") === true
       }
@@ -289,14 +293,14 @@ class AccountActorSpec
 
       val decrease = 8
       val test = TestProbe()
-      accountRegion.tell(DecreaseBalance(accNumber, decrease), test.ref)
+      accountRegion.tell(DecreaseBalance(accNumber, decrease, generateTransactionId), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("you broke") === true
       }
     }
 
 
-    "fail to get current balance due ot inacitve account" in {
+    "fail to get current balance due ot inactive account" in {
 
       val test = TestProbe()
       accountRegion.tell(GetCurrentBalance(accNumber), test.ref)
@@ -311,6 +315,80 @@ class AccountActorSpec
       accountRegion.tell(CreateAccount(accountDetails), test.ref)
       test.expectMsgPF() { case Failure(err: AccountError) =>
         err.getMessage.contains("invalid command") === true
+      }
+    }
+  }
+
+  "AccountActor with good credit score" should {
+
+    val accountDetailsA = BasicAccountDetails("2193", "Jerry", "Cook")
+    val accountDetailsB = BasicAccountDetails("2194", "Thomas", "Cay")
+    val transactionId = generateTransactionId
+    val balanceA = 10
+    val moveAmount = 5.5
+
+    "successfully acknowledge 2 `create account` requests" in {
+
+      val test = TestProbe()
+      accountRegion.tell(CreateAccount(accountDetailsA), test.ref)
+      accountRegion.tell(CreateAccount(accountDetailsB), test.ref)
+      test.receiveN(2).collect {
+        case msg: AccountCreationRequestAcknowledged =>
+          msg.accountDetails.accNumber === accountDetailsA.accNumber ||
+            msg.accountDetails.accNumber === accountDetailsB.accNumber
+      }.size == 2
+    }
+
+    "successfully increase balance of one the accounts" in {
+
+      val test = TestProbe()
+      accountRegion.tell(IncreaseBalance(accountDetailsA.accNumber, balanceA, transactionId), test.ref)
+      test.expectMsgPF() { case msg: BalanceIncreased =>
+        msg.amount === balanceA
+      }
+    }
+
+    "successfully move balance from one account to another" in {
+
+      val test = TestProbe()
+      accountRegion.tell(
+        MoveBalance(accountDetailsA.accNumber, moveAmount, accountDetailsB.accNumber, transactionId), test.ref)
+      test.expectMsgPF() { case MoveMoneyDebited(thisTransactionId, amount, targetAccNumber) =>
+        amount === moveAmount
+        targetAccNumber === accountDetailsB.accNumber
+        thisTransactionId === transactionId
+      }
+      system.eventStream.subscribe(
+        test.ref,
+        classOf[AccountTransactionCompletedEvent])
+      test.expectMsgPF() { case AccountTransactionCompletedEvent(accNumber, completedTransactionId) =>
+        accNumber === accountDetailsA.accNumber
+        completedTransactionId === transactionId
+      }
+      accountRegion.tell(GetCurrentBalance(accountDetailsA.accNumber), test.ref)
+      test.expectMsgPF() { case Success(balance) =>
+        balance === (balanceA - moveAmount)
+      }
+      accountRegion.tell(GetCurrentBalance(accountDetailsB.accNumber), test.ref)
+      test.expectMsgPF() { case Success(balance) =>
+        balance === moveAmount
+      }
+    }
+
+    "fail to move balance if there is not enough funds" in {
+      val test = TestProbe()
+      accountRegion.tell(
+        MoveBalance(accountDetailsA.accNumber, 10000, accountDetailsB.accNumber, transactionId), test.ref)
+      test.expectMsgPF() { case Failure(err: AccountError) =>
+        err.getMessage.contains("insufficient funds") === true
+      }
+      accountRegion.tell(GetCurrentBalance(accountDetailsA.accNumber), test.ref)
+      test.expectMsgPF() { case Success(balance) =>
+        balance === (balanceA - moveAmount)
+      }
+      accountRegion.tell(GetCurrentBalance(accountDetailsB.accNumber), test.ref)
+      test.expectMsgPF() { case Success(balance) =>
+        balance === moveAmount
       }
     }
   }

@@ -1,10 +1,13 @@
 package sample.persistence
 
+import java.util.UUID
+
 import akka.actor.{ActorLogging, ReceiveTimeout}
 import akka.cluster.sharding.ShardRegion
 import akka.persistence.{PersistentActor, SaveSnapshotFailure, SaveSnapshotSuccess, SnapshotOffer}
 import akka.cluster.sharding.ShardRegion.Passivate
-import sample.queue.{AccountVerificationT, CreditScore}
+import sample.queue.{AccountActorProviderT, AccountVerificationT, CreditScore}
+
 import scala.concurrent.duration.{FiniteDuration, MILLISECONDS}
 import scala.util.{Failure, Success}
 import akka.pattern.pipe
@@ -61,6 +64,10 @@ object AccountActor {
     final def id: String = (math.abs(accNumber.hashCode) % 100).toString //TODO: parameterize 100
   }
 
+  protected abstract class BalanceAccountCommand extends AccountCommand {
+    val transactionId: TransactionId
+  }
+
   val shardName = "Account"
 
   val extractEntityId: ShardRegion.ExtractEntityId = {
@@ -74,16 +81,24 @@ object AccountActor {
   final case class CreateAccount(accDetails: AccountDetails) extends AccountCommand {
     override val accNumber = accDetails.accNumber
   }
-  final case class IncreaseBalance(override val accNumber: String, amount: Double) extends AccountCommand
-  final case class DecreaseBalance(override val accNumber: String, amount: Double) extends AccountCommand
+  final case class IncreaseBalance(
+    override val accNumber: String, amount: Double, override val transactionId: TransactionId) extends BalanceAccountCommand
+  final case class DecreaseBalance(override val accNumber: String, amount: Double, override val transactionId: TransactionId) extends BalanceAccountCommand
+  final case class MoveBalance(override val accNumber: String, amount: Double, targetAccNumber: String, override val transactionId: TransactionId) extends BalanceAccountCommand
   final case class GetCurrentBalance(override val accNumber: String) extends AccountCommand
+
   final case object AccountStop
 
   sealed trait AccountEvent
+  protected abstract class BalanceAccountEvent extends AccountEvent {
+    val transactionId: TransactionId
+    val amount: Double
+  }
   final case class AccountCreationRequestAcknowledged(accountDetails: AccountDetails) extends AccountEvent
   final case class AccountCreated(accountDetails: AccountDetails) extends AccountEvent
-  final case class BalanceIncreased(amount: Double) extends AccountEvent
-  final case class BalanceDecreased(amount: Double) extends AccountEvent
+  final case class BalanceIncreased(override val transactionId: TransactionId, override val amount: Double) extends BalanceAccountEvent
+  final case class BalanceDecreased(override val transactionId: TransactionId, override val amount: Double) extends BalanceAccountEvent
+  final case class MoveMoneyDebited(override val transactionId: TransactionId, override val amount: Double, targetAccNumber: String) extends BalanceAccountEvent
 
   final case object AccountSnapshot
 
@@ -91,15 +106,25 @@ object AccountActor {
 
   final case class AccountPassivatedEvent(accNumber: String)
   final case class AccountTakeSnapshotEvent(accNumber: String)
+  final case class AccountTransactionCompletedEvent(accNumber: String, transactionId: TransactionId)
 
-  final case class AccountState(accountDetails: AccountDetails, balance: Double)
+  final case class AccountState(
+    accountDetails: AccountDetails,
+    balance: Double,
+    var pendingTransactions: Map[TransactionId, Transaction])
 
   object AccountState {
-    def empty = AccountState(EmptyAccountDetails, 0.0)
+    def empty = AccountState(EmptyAccountDetails, 0.0, Map.empty[TransactionId, Transaction])
   }
+
+  type TransactionId = String
+
+  final case class Transaction(id: TransactionId, amount: Double, targetAccNumber: String, numberOfTries: Int)
 }
 
-class AccountActor(accVerifier: AccountVerificationT) extends PersistentActor with ActorLogging {
+//TODO: should we really go here through accAccountProvider
+class AccountActor(accVerifier: AccountVerificationT, accAccountProvider: AccountActorProviderT)
+  extends PersistentActor with ActorLogging {
 
   import AccountActor._
 
@@ -131,6 +156,7 @@ class AccountActor(accVerifier: AccountVerificationT) extends PersistentActor wi
   ** Optimization could either to remember if there is new information per messages received, or schedule a snapshot
   ** only if the is new a information or move GetBalance to PersistenceQuery
   */
+  //TODO: move to prestart/prerestart
   context.setReceiveTimeout(passivateTimeout)
   val snapShotSchedule = context.system.scheduler.schedule(snapshotDelay, snapshotInterval, self, AccountSnapshot)
 
@@ -160,46 +186,76 @@ class AccountActor(accVerifier: AccountVerificationT) extends PersistentActor wi
         reason = "Credit score check incomplete")
       state = state.copy(accountDetails = accountDetails)
       context.become(inactiveAccountReceive)
-    case BalanceIncreased(amount) =>
-      state = state.copy(balance = state.balance + amount)
+    case BalanceIncreased(transactionId, amount) =>
+      state = state.copy(
+        balance = state.balance + amount,
+        pendingTransactions = state.pendingTransactions - transactionId)
       context.become(activeAccountReceive)
-    case BalanceDecreased(amount) =>
+    case BalanceDecreased(transactionId, amount) =>
       state = state.copy(balance = state.balance - amount)
       context.become(activeAccountReceive)
+    //TODO: MoveMoneyDebited event
   }
 
   def activeAccountReceive: Receive =
     changeBalanceReceive orElse maintenanceReceive orElse invalidReceive
 
+  private def validAmount(amount: Double): Boolean = amount > 0
+  private def canDebit(amount: Double) = state.balance >= amount
+  // TODO: Who generates trannsaction ids? Right now assume it comes from outside
+  // private def generateTransactionId() = UUID.randomUUID().toString
+
+  //TODO: multiple checks are tedious - abstract out
   def changeBalanceReceive: Receive = {
-    case IncreaseBalance(_, amount) if amount >= 0 =>
-      persist(BalanceIncreased(amount)) { _ =>
-        sender() ! Success(BalanceIncreased(amount))
+    case IncreaseBalance(_, amount, transactionId) if validAmount(amount) =>
+      persist(BalanceIncreased(transactionId, amount)) { ev =>
+        sender() ! ev
         state = state.copy(balance = state.balance + amount)
       }
-    case IncreaseBalance(_, amount) if amount < 0 =>
+    case IncreaseBalance(_, amount, transactionId) if !validAmount(amount) =>
       sender() ! Failure(AccountError(
-        s"Can't increase balance with negative amount: $amount"))
-    case DecreaseBalance(_, amount) if amount > 0 && state.balance < amount =>
-      sender() ! Failure(AccountError(
-        s"Can't decrease balance, insufficient funds for: $amount"))
-    case DecreaseBalance(_, amount) if amount >= 0 =>
-      persist(BalanceDecreased(amount)) { _ =>
-        sender() ! Success(BalanceDecreased(amount))
+        s"Can't increase balance with negative amount: $amount, transactionId: $transactionId"))
+    case DecreaseBalance(_, amount, transactionId) if validAmount(amount) && canDebit(amount) =>
+      persist(BalanceDecreased(transactionId, amount)) { ev =>
         state = state.copy(balance = state.balance - amount)
+        sender() ! ev
       }
-    case DecreaseBalance(_, amount) if amount < 0 =>
+    case DecreaseBalance(_, amount, transactionId) if !validAmount(amount) =>
       sender() ! Failure(AccountError(
-        s"Can't decrease balance with negative amount: $amount"))
-    case GetCurrentBalance(_) =>
-      sender() ! Success(state.balance)
+        s"Can't decrease balance with negative amount: $amount, transactionId: $transactionId"))
+    case DecreaseBalance(_, amount, transactionId) if !canDebit(amount) =>
+      sender() ! Failure(AccountError(
+        s"Can't decrease balance, insufficient funds for: $amount, transactionId: $transactionId"))
+    case MoveBalance(_, amount, targetAccNumber, transactionId) if validAmount(amount) && canDebit(amount) =>
+      persist(MoveMoneyDebited(transactionId, amount, targetAccNumber)) { ev: MoveMoneyDebited  =>
+        //TODO: do we want explicitly mention originAccNumber ?
+        implicit val system = context.system
+        accAccountProvider.getAccountActor() ! IncreaseBalance(targetAccNumber, amount, transactionId)
+        state = state.copy(balance = state.balance - amount,
+          pendingTransactions = state.pendingTransactions +
+            (transactionId -> Transaction(transactionId, amount, targetAccNumber, 1)))
+        sender() ! ev
+      }
+    case MoveBalance(_, amount, _, transactionId) if !canDebit(amount) =>
+      sender() ! Failure(AccountError(
+        s"Can't move balance, insufficient funds for: $amount, transactionId: $transactionId"))
+    case MoveBalance(_, amount, _, transactionId) if !validAmount(amount) =>
+      sender() ! Failure(AccountError(
+        s"Can't decrease balance with negative amount: $amount, transactionId: $transactionId"))
+    case BalanceIncreased(transactionId, _) =>
+    //TODO: send off to completed on top of removing from pending
+    context.system.eventStream.publish(
+      AccountTransactionCompletedEvent(state.accountDetails.accNumber, transactionId))
+    state = state.copy(pendingTransactions = state.pendingTransactions - transactionId)
+    case GetCurrentBalance(_) => sender() ! Success(state.balance)
   }
 
   def initialReceive: Receive = {
     case CreateAccount(accountDetails) =>
-      persist(AccountCreationRequestAcknowledged(accountDetails)) { _ =>
-        sender() ! Success(AccountCreationRequestAcknowledged(accountDetails))
-        accVerifier.getCreditCheck(name = accountDetails.name, lastName = accountDetails.lastName).pipeTo(self)
+      persist(AccountCreationRequestAcknowledged(accountDetails)) { ev =>
+        sender() ! ev
+        accVerifier.getCreditCheck(name = accountDetails.name, lastName = accountDetails.lastName)
+          .recover{case ex => Failure(ex)}.pipeTo(self)
         state = state.copy(accountDetails = accountDetails)
         context.become(pendingCreationReceive)
       }
@@ -215,27 +271,27 @@ class AccountActor(accVerifier: AccountVerificationT) extends PersistentActor wi
     case Success(creditScore: CreditScore) =>
       val accountDetails = InactiveAccountDetails(
         account = state.accountDetails, score = creditScore, reason = "low score")
-      persist(AccountCreated(accountDetails)) { _ =>
-        sender() ! Success(AccountCreated(accountDetails))
+      persist(AccountCreated(accountDetails)) {ev =>
+        sender() ! ev
         state = state.copy(accountDetails = accountDetails)
         context.become(inactiveAccountReceive)
       }
     case Failure(ex) =>
       val accountDetails = InactiveAccountDetails(
         account = state.accountDetails, score = CreditScore(0), reason = ex.getMessage)
-      persist(AccountCreated(accountDetails)) { _ =>
-        sender() ! Success(AccountCreated(accountDetails))
+      persist(AccountCreated(accountDetails)) { ev =>
+        sender() ! ev
         state = state.copy(accountDetails = accountDetails)
         context.become(inactiveAccountReceive)
       }
   }
 
-  def inactiveAccountReceive: Receive = PartialFunction { cmd: Any =>
-    (cmd, state.accountDetails) match {
-      case (_, accDetails: InactiveAccountDetails) =>
+  def inactiveAccountReceive: Receive = {
+    //TODO: Ugly!!!!!
+      case cmd: AccountCommand if state.accountDetails.isInstanceOf[InactiveAccountDetails] =>
+        val accDetails = state.accountDetails.asInstanceOf[InactiveAccountDetails]
         sender() ! Failure(AccountError(
           s"Can't perform: $cmd, inactive account due: ${accDetails.reason}"))
-    }
   }
 
   def maintenanceReceive: Receive = {

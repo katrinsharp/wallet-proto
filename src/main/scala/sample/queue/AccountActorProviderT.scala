@@ -12,7 +12,7 @@ trait AccountActorProviderT {
   def getAccountActor()(implicit system: ActorSystem): ActorRef
 }
 
-trait ClusterAccountActorProvider extends AccountActorProviderT {
+class ClusterAccountActorProvider extends AccountActorProviderT {
 
   override def getAccountActor()(implicit system: ActorSystem): ActorRef =
     ClusterSharding(system).shardRegion(AccountActor.shardName)
