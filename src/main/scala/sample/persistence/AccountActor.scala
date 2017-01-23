@@ -122,7 +122,6 @@ object AccountActor {
   final case class Transaction(id: TransactionId, amount: Double, targetAccNumber: String, numberOfTries: Int)
 }
 
-//TODO: should we really go here through accAccountProvider
 class AccountActor(accVerifier: AccountVerificationT, accAccountProvider: AccountActorProviderT)
   extends PersistentActor with ActorLogging {
 
