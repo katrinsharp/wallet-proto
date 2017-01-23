@@ -13,7 +13,7 @@ protected abstract class WalletBalanceEvent extends WalletEvent {
   require(amount > 0, s"Amount can't be negative: $amount")
 }
 final case class WalletCreationRequestAcknowledged(
-  walletDetails: BasicWallet) extends WalletEvent
+  wallet: BasicWallet) extends WalletEvent
 
 final case class WalletCreated(walletDetails: FullWallet) extends WalletEvent
 

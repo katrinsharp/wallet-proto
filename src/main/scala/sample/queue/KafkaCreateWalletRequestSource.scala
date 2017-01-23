@@ -55,7 +55,7 @@ object CreateAccountReqConsumeMessage {
 
 }
 
-trait CreateAccountReqSourceT {
+trait CreateWalletRequestSourceT {
 
   def groupId: String
   def bootStrapServers: String
@@ -66,7 +66,7 @@ trait CreateAccountReqSourceT {
 }
 
 //TODO: provide a way to close gracefully
-trait KafkaCreateAccountReqSource extends CreateAccountReqSourceT {
+trait KafkaCreateWalletRequestSource extends CreateWalletRequestSourceT {
 
   override val groupId = "groupId"
   override val bootStrapServers = "localhost:9092"

@@ -6,12 +6,15 @@ import java.util.UUID
 import akka.actor.{ActorRef, ActorSystem}
 import akka.cluster.Cluster
 import akka.cluster.sharding.{ClusterSharding, ClusterShardingSettings}
+import akka.persistence.fsm.PersistentFSM.{CurrentState, SubscribeTransitionCallBack, Transition}
 import akka.testkit.{TestKit, TestProbe}
 import org.scalatest.{BeforeAndAfterAll, Matchers, WordSpecLike}
 import wallet.persistence.WalletEventStreamMessages.WalletTransactionCompletedEvent
 import wallet.services.{CreditScore, CreditVerificationT, WalletCreationNotifierT}
 import wallet.transaction.WalletTransaction.WalletTransactionId
-import wallet.transaction.{InsufficientWalletFunds, InvalidWalletTransaction, WalletTransactionError}
+import wallet.transaction.{InsufficientWalletFunds, InvalidWalletTransaction}
+
+import scala.concurrent.duration._
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
@@ -53,6 +56,7 @@ class WalletPersistentFSMSpec
     override def getCreditCheck(name: String, lastName: String): Future[Try[CreditScore]] = {
       if (lastName.contains("lowScore")) Future.successful(Success(CreditScore(10)))
       else if(lastName.contains("errorScore")) Future.successful(Failure(new Exception("You broke buddy")))
+      else if(lastName.contains("failedScore")) Future.failed(new Exception("Service is down"))
       else Future.successful(Success(CreditScore(200)))
     }
   }
@@ -81,48 +85,104 @@ class WalletPersistentFSMSpec
     extractEntityId = extractEntityId,
     extractShardId = extractShardId)
 
+  "Wallet" should {
+
+    "throw an exception if tries to access details of empty wallet" in {
+      assertThrows[IllegalAccessException] {
+        EmptyWallet.accNumber
+      }
+      assertThrows[IllegalAccessException] {
+        EmptyWallet.name
+      }
+      assertThrows[IllegalAccessException] {
+        EmptyWallet.lastName
+      }
+    }
+
+    "throw an exception if tries to create an increase balance message with negative amount" in {
+
+      assertThrows[IllegalArgumentException] {
+        IncreaseWalletBalance("", -1, generateTransactionId)
+      }
+    }
+    "throw an exception if tries to create an decrease balance message with negative amount" in {
+
+      assertThrows[IllegalArgumentException] {
+        DecreaseWalletBalance("", -1, generateTransactionId)
+      }
+    }
+    "throw an exception if tries to create an increase balance event with negative amount" in {
+
+      assertThrows[IllegalArgumentException] {
+        WalletBalanceIncreased(generateTransactionId, -1)
+      }
+    }
+    "throw an exception if tries to create an decrease balance event with negative amount" in {
+
+      assertThrows[IllegalArgumentException] {
+        WalletBalanceDecreased(generateTransactionId, -1)
+      }
+    }
+    "throw an exception if tries to create a transfer money debited event with negative amount" in {
+
+      assertThrows[IllegalArgumentException] {
+        WalletTransferMoneyDebited("", generateTransactionId, -1)
+      }
+    }
+    "throw an exception if tries to create a transfer money credited event with negative amount" in {
+
+      assertThrows[IllegalArgumentException] {
+        WalletTransferMoneyCredited(generateTransactionId, -1)
+      }
+    }
+
+    "have unique name for each wallet state" in {
+
+      val stateNames = Set(WalletPendingCreationState.identifier, WalletInactiveState.identifier, WalletActiveState.identifier)
+      stateNames.size === 3
+    }
+  }
+
   "User with high credit score" should {
 
     val accNumber = "1234"
     val name = "Big"
     val lastName = "Lebowski"
 
-    /*"fail to increase balance if wallet doesn't exist yet" in {
+    "fail to increase balance if wallet doesn't exist yet" in {
 
       val test = TestProbe()
-      accountRegion.tell(IncreaseBalance(walletDetails.accNumber, 1, generateTransactionId), test.ref)
-      test.expectMsgPF() { case Failure(err: AccountError) =>
-        err.getMessage.contains("invalid command") === true
-      }
-    }*/
+      accountRegion.tell(IncreaseWalletBalance(accNumber, 1, generateTransactionId), test.ref)
+      test.expectMsgType[InvalidWalletTransaction]
+    }
 
     "successfully acknowledge a `create account` request" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
-      test.expectMsgPF() { case msg: WalletCreationRequestAcknowledged =>
-        msg.walletDetails.accNumber === accNumber
+      test.expectMsgPF() {
+        case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber == accNumber =>
       }
     }
 
     "successfully increase balance" in {
 
       val increase = 10
+      val transactionId = generateTransactionId
       val test = TestProbe()
-      accountRegion.tell(IncreaseWalletBalance(accNumber, increase, generateTransactionId), test.ref)
-      test.expectMsgPF() { case msg: WalletBalanceIncreased =>
-        msg.amount === increase
-      }
+      val expected = WalletBalanceIncreased(transactionId, increase)
+      accountRegion.tell(IncreaseWalletBalance(accNumber, increase, transactionId), test.ref)
+      test.expectMsg(expected)
     }
 
     "successfully decrease balance" in {
 
       val decrease = 8
+      val transactionId = generateTransactionId
       val test = TestProbe()
-      accountRegion.tell(DecreaseWalletBalance(accNumber, decrease, generateTransactionId), test.ref)
-      test.expectMsgPF() { case msg: WalletBalanceDecreased =>
-        msg.amount === decrease
-      }
+      val expected = WalletBalanceDecreased(transactionId, decrease)
+      accountRegion.tell(DecreaseWalletBalance(accNumber, decrease, transactionId), test.ref)
+      test.expectMsg(expected)
     }
 
     "fail to decrease balance due to insufficient funds" in {
@@ -130,41 +190,21 @@ class WalletPersistentFSMSpec
       val decrease = 3
       val test = TestProbe()
       accountRegion.tell(DecreaseWalletBalance(accNumber, decrease, generateTransactionId), test.ref)
-      test.expectMsgPF() { case InsufficientWalletFunds =>
-        true === true
-      }
+      test.expectMsg(InsufficientWalletFunds)
     }
 
     "successfully get current balance" in {
 
       val test = TestProbe()
       accountRegion.tell(GetCurrentWalletBalance(accNumber), test.ref)
-      test.expectMsgPF() { case balance: Double =>
-        balance === 2.0
-      }
+      test.expectMsg(2.0)
     }
 
     "fail to create account if account already exists" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
-    }
-
-    "fail to create an increase balance message if amount is negative" in {
-
-      assertThrows[IllegalArgumentException] {
-        IncreaseWalletBalance(accNumber, -1, generateTransactionId)
-      }
-    }
-
-    "fail to create a decrease balance message if amount is negative" in {
-
-      assertThrows[IllegalArgumentException] {
-        DecreaseWalletBalance(accNumber, -1, generateTransactionId)
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
     // Default configuration is to passivate after 5 second
@@ -212,17 +252,15 @@ class WalletPersistentFSMSpec
 
       val test = TestProbe()
       accountRegion.tell(IncreaseWalletBalance(accNumber, 1, generateTransactionId), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
     "successfully acknowledge a `create account` request" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
-      test.expectMsgPF() { case msg: WalletCreationRequestAcknowledged =>
-        msg.walletDetails.accNumber === accNumber
+      test.expectMsgPF() {
+        case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber === accNumber =>
       }
     }
 
@@ -231,9 +269,7 @@ class WalletPersistentFSMSpec
       val increase = 10
       val test = TestProbe()
       accountRegion.tell(IncreaseWalletBalance(accNumber, increase, generateTransactionId), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
     "fail to decrease balance due to inactive account" in {
@@ -241,9 +277,7 @@ class WalletPersistentFSMSpec
       val decrease = 8
       val test = TestProbe()
       accountRegion.tell(DecreaseWalletBalance(accNumber, decrease, generateTransactionId), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
 
@@ -251,18 +285,14 @@ class WalletPersistentFSMSpec
 
       val test = TestProbe()
       accountRegion.tell(GetCurrentWalletBalance(accNumber), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
     "fail to create account if account already exists" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
   }
 
@@ -276,17 +306,15 @@ class WalletPersistentFSMSpec
 
       val test = TestProbe()
       accountRegion.tell(IncreaseWalletBalance(accNumber, 1, generateTransactionId), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
     "successfully acknowledge a `create account` request" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
-      test.expectMsgPF() { case msg: WalletCreationRequestAcknowledged =>
-        msg.walletDetails.accNumber === accNumber
+      test.expectMsgPF() {
+        case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber === accNumber =>
       }
     }
 
@@ -295,9 +323,7 @@ class WalletPersistentFSMSpec
       val increase = 10
       val test = TestProbe()
       accountRegion.tell(IncreaseWalletBalance(accNumber, increase, generateTransactionId), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
     "fail to decrease balance due to inactive account" in {
@@ -305,9 +331,7 @@ class WalletPersistentFSMSpec
       val decrease = 8
       val test = TestProbe()
       accountRegion.tell(DecreaseWalletBalance(accNumber, decrease, generateTransactionId), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
 
@@ -315,19 +339,41 @@ class WalletPersistentFSMSpec
 
       val test = TestProbe()
       accountRegion.tell(GetCurrentWalletBalance(accNumber), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
 
     "fail to create account if account already exists" in {
 
       val test = TestProbe()
       accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
-      test.expectMsgPF() { case err: InvalidWalletTransaction =>
-        err.message.contains("invalid command") === true
-      }
+      test.expectMsgType[InvalidWalletTransaction]
     }
+  }
+
+  "AccountActor that got fail while calling credit score check" should {
+
+    val accNumber = "5279"
+    val name = "Donald"
+    val lastName = "Duck-failedScore"
+
+    "successfully acknowledge a `create account` request and transition to inactive state" in {
+
+      val test = TestProbe()
+
+      val fsmRef = system.actorOf(WalletPersistentFSM.props(
+        new TestAccountVerification,
+        new ClusterWalletRefProvider,
+        new WalletCreationNotifier(walletCreationNotifier.ref)))
+
+      fsmRef ! SubscribeTransitionCallBack(test.ref)
+      fsmRef.tell(CreateWallet(accNumber, name, lastName), test.ref)
+      test.expectMsg(CurrentState(fsmRef, WalletPendingCreationState, None))
+      test.expectMsgPF() {
+        case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber === accNumber =>
+      }
+      test.expectMsg(Transition(fsmRef, WalletPendingCreationState, WalletInactiveState, None))
+    }
+
   }
 
   "AccountActor with good credit score" should {
@@ -335,7 +381,7 @@ class WalletPersistentFSMSpec
     val walletA = BasicWallet("2193", "Jerry", "Cook")
     val walletB = BasicWallet("2194", "Thomas", "Cay")
     val transactionId = generateTransactionId
-    val balanceA = 12
+    val balanceA = 12.0
     val moveAmount = 5.5
 
     "successfully acknowledge 2 `create account` requests" in {
@@ -345,63 +391,47 @@ class WalletPersistentFSMSpec
       accountRegion.tell(CreateWallet(walletB.accNumber, walletB.name, walletB.lastName), test.ref)
       test.receiveN(2).collect {
         case msg: WalletCreationRequestAcknowledged =>
-          msg.walletDetails.accNumber === walletA.accNumber ||
-            msg.walletDetails.accNumber === walletB.accNumber
+          msg.wallet.accNumber === walletA.accNumber ||
+            msg.wallet.accNumber === walletB.accNumber
       }.size == 2
     }
 
     "successfully increase balance of one the accounts" in {
 
       val test = TestProbe()
+      val expected = WalletBalanceIncreased(transactionId, balanceA)
       accountRegion.tell(IncreaseWalletBalance(walletA.accNumber, balanceA, transactionId), test.ref)
-      test.expectMsgPF() { case msg: WalletBalanceIncreased =>
-        msg.amount === balanceA
-      }
+      test.expectMsg(expected)
     }
 
     "successfully move balance from one account to another" in {
 
       val test = TestProbe()
+      val expectedDebited = WalletTransferMoneyDebited(walletB.accNumber, transactionId, moveAmount)
       accountRegion.tell(
         TransferBalanceBetweenWallets(walletA.accNumber, moveAmount, walletB.accNumber, transactionId),
         test.ref)
-      test.expectMsgPF() { case WalletTransferMoneyDebited(targetAccNumber, thisTransactionId, amount) =>
-        amount === moveAmount
-        targetAccNumber === walletB.accNumber
-        thisTransactionId === transactionId
-      }
-      /*system.eventStream.subscribe(
+      test.expectMsg(expectedDebited)
+      system.eventStream.subscribe(
         test.ref,
         classOf[WalletTransactionCompletedEvent])
-      test.expectMsgPF() { case WalletTransactionCompletedEvent(accNumber, completedTransactionId) =>
-        accNumber === walletA.accNumber
-        completedTransactionId === transactionId
-      }
+      val expectedCompleted = WalletTransactionCompletedEvent(walletA.accNumber, transactionId)
+      test.expectMsg(expectedCompleted)
       accountRegion.tell(GetCurrentWalletBalance(walletA.accNumber), test.ref)
-      test.expectMsgPF() { case Success(balance) =>
-        balance === (balanceA - moveAmount)
-      }
+      test.expectMsg(balanceA - moveAmount)
       accountRegion.tell(GetCurrentWalletBalance(walletB.accNumber), test.ref)
-      test.expectMsgPF() { case Success(balance) =>
-        balance === moveAmount
-      }*/
+      test.expectMsg(moveAmount)
     }
 
     "fail to move balance if there is not enough funds" in {
       val test = TestProbe()
       accountRegion.tell(
         TransferBalanceBetweenWallets(walletA.accNumber, 10000, walletB.accNumber, transactionId), test.ref)
-      test.expectMsgPF() { case InsufficientWalletFunds =>
-        true === true
-      }
-      /*accountRegion.tell(GetCurrentWalletBalance(walletA.accNumber), test.ref)
-      test.expectMsgPF() { case Success(balance) =>
-        balance === (balanceA - moveAmount)
-      }
+      test.expectMsg(InsufficientWalletFunds)
+      accountRegion.tell(GetCurrentWalletBalance(walletA.accNumber), test.ref)
+      test.expectMsg(balanceA - moveAmount)
       accountRegion.tell(GetCurrentWalletBalance(walletB.accNumber), test.ref)
-      test.expectMsgPF() { case Success(balance) =>
-        balance === moveAmount
-      }*/
+      test.expectMsg(moveAmount)
     }
   }
 }

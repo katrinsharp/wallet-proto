@@ -1,9 +1,8 @@
 package wallet.persistence
 
-import sample.persistence.AccountActor.TransactionId
 import wallet.services.CreditScore
 import wallet.transaction.WalletTransaction
-import scala.collection.immutable.Queue
+import wallet.transaction.WalletTransaction.WalletTransactionId
 
 /**
   * Wallet details, which is part of Wallet state
@@ -16,9 +15,9 @@ sealed trait Wallet {
 
 final case object EmptyWallet
   extends Wallet {
-  override def accNumber: String = ???
-  override def name: String = ???
-  override def lastName: String = ???
+  override def accNumber: String = throw new IllegalAccessException("Empty Wallet")
+  override def name: String = throw new IllegalAccessException("Empty Wallet")
+  override def lastName: String = throw new IllegalAccessException("Empty Wallet")
 }
 
 final case class BasicWallet(
@@ -39,14 +38,14 @@ sealed trait WithWalletBalance {
 //TODO: UGLY!!!
 trait WalletTransactions {
 
-  private[this] var transactions: Map[TransactionId, WalletTransaction] =
-    Map.empty[TransactionId, WalletTransaction]
+  private[this] var transactions: Map[WalletTransactionId, WalletTransaction] =
+    Map.empty[WalletTransactionId, WalletTransaction]
 
   def addTransaction(transaction: WalletTransaction): Unit = {
     transactions = transactions + (transaction.id -> transaction)
   }
 
-  def removeTransaction(transactionId: TransactionId): Option[WalletTransaction] = {
+  def removeTransaction(transactionId: WalletTransactionId): Option[WalletTransaction] = {
     val maybeTransaction = transactions.get(transactionId)
     transactions = transactions - transactionId
     maybeTransaction

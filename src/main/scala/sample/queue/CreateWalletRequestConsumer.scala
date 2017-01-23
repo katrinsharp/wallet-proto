@@ -1,12 +1,11 @@
 package sample.queue
 
-import java.util.concurrent.TimeUnit
-
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.Sink
 import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
+import wallet.persistence.WalletRefProviderT
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -15,17 +14,17 @@ import scala.util.{Failure, Success}
 /**
   * Continuously consumes CreateAccount requests from queue
   */
-object CreateAccountReqConsumer {
+object CreateWalletRequestConsumer {
 
   val ERROR_SENDING_TO_ACCOUNT_ACTOR_MESSAGE = "Error sending to account actor"
   val TIMEOUT_SENDING_TO_ACCOUNT_ACTOR_MESSAGE = "Timeout sending to account actor"
 }
 
-class CreateAccountReqConsumer()(implicit system: ActorSystem) {
+class CreateWalletRequestConsumer()(implicit system: ActorSystem) {
 
-  this: CreateAccountReqSourceT with AccountActorProviderT =>
+  this: CreateWalletRequestSourceT with WalletRefProviderT =>
 
-  import CreateAccountReqConsumer._
+  import CreateWalletRequestConsumer._
 
   private implicit val timeout: Timeout = FiniteDuration(
     system.settings.config.getDuration(
@@ -44,7 +43,7 @@ class CreateAccountReqConsumer()(implicit system: ActorSystem) {
     source
       .mapAsync(1) { msg =>
 
-        (getAccountActor ? msg.value).map {
+        (getWalletRef() ? msg.value).map {
           case Success(()) => Success(msg.committableOffset())
           case _ => // TODO: recognize the error
             system.log.error(ERROR_SENDING_TO_ACCOUNT_ACTOR_MESSAGE)

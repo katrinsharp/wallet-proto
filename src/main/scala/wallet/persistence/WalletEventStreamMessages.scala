@@ -1,12 +1,13 @@
 package wallet.persistence
 
-import sample.persistence.AccountActor.TransactionId
+import wallet.transaction.WalletTransaction.WalletTransactionId
 
 /**
   * Created by katrin on 2017-01-23.
   */
 object WalletEventStreamMessages {
 
-  final case class WalletTransactionCompletedEvent(accNumber: String, transactionId: TransactionId)
-
+  final case class WalletTransactionCompletedEvent(
+    accNumber: String,
+    transactionId: WalletTransactionId)
 }

@@ -1,16 +1,17 @@
 package sample.queue
 
-import akka.actor.{ActorRef, ActorSystem}
-import akka.testkit.{EventFilter, TestActor, TestKit, TestProbe}
+import akka.actor.ActorSystem
+import akka.testkit.{TestKit, TestProbe}
 import net.manub.embeddedkafka.EmbeddedKafka
 import org.scalatest.{BeforeAndAfterAll, Matchers, WordSpecLike}
+import wallet.persistence.WalletRefProviderT
 
 import scala.util.{Failure, Success}
 
 /**
   * Tests consumer of CreateAccount requests
   */
-class CreateAccountReqConsumerSpec
+class CreateWalletRequestConsumerSpec
   extends TestKit(ActorSystem("test-system"))
     with WordSpecLike
     with EmbeddedKafka
@@ -28,19 +29,20 @@ class CreateAccountReqConsumerSpec
     TestKit.shutdownActorSystem(system)
   }
 
-  trait TestKafkaCreateAccountReqKafkaSource extends KafkaCreateAccountReqSource {
+  trait TestKafkaCreateWalletRequestKafkaSource extends KafkaCreateWalletRequestSource {
 
     override val bootStrapServers = "localhost:6001"
   }
 
-  trait TestAccountActorProvider extends AccountActorProviderT {
+  trait TestWalletProvider extends WalletRefProviderT {
 
     val testProbe = TestProbe()
-    override def getAccountActor()(implicit system: ActorSystem) = testProbe.ref
+
+    override def getWalletRef()(implicit system: ActorSystem) = testProbe.ref
   }
 
-  val testKafkaConsumer = new CreateAccountReqConsumer()
-    with TestKafkaCreateAccountReqKafkaSource with TestAccountActorProvider
+  val testKafkaConsumer = new CreateWalletRequestConsumer()
+    with TestKafkaCreateWalletRequestKafkaSource with TestWalletProvider
 
     "CreateAccountReqConsumer" should {
 

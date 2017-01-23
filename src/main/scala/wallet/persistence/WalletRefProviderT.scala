@@ -2,7 +2,6 @@ package wallet.persistence
 
 import akka.actor.{ActorRef, ActorSystem}
 import akka.cluster.sharding.ClusterSharding
-import sample.persistence.AccountActor
 
 /**
   * Locates Wallets

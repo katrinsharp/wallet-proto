@@ -55,7 +55,7 @@ class WalletPersistentFSM(
   //TODO: implement recovery
   override def applyEvent(domainEvent: WalletEvent, currentWallet: Wallet): Wallet = {
     (domainEvent, currentWallet) match {
-      case (ev: WalletCreationRequestAcknowledged, EmptyWallet) => ev.walletDetails
+      case (ev: WalletCreationRequestAcknowledged, EmptyWallet) => ev.wallet
       case (ev: WalletCreated, _: BasicWallet) => ev.walletDetails
       case (ev: WalletBalanceIncreased, activeWallet: ActiveWallet) =>
         activeWallet.copy(balance = activeWallet.balance + ev.amount)
@@ -69,7 +69,7 @@ class WalletPersistentFSM(
           numberOfTries = 1))
         walletRefProvider.getWalletRef() ! CreditWalletBalance(
           ev.targetAccNumber, ev.amount, ev.transactionId)
-        activeWallet
+        activeWallet.copy(balance = activeWallet.balance - ev.amount)
       // It could become Inactive meanwhile so FullWallet instead of ActiveWallet
       case (ev: WalletTransferMoneyCredited, activeWallet: FullWallet) =>
         //TODO: report if transaction didn't exist
