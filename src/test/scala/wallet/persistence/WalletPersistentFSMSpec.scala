@@ -3,13 +3,13 @@ package wallet.persistence
 import java.io.File
 import java.util.UUID
 
-import akka.actor.{ActorRef, ActorSystem}
+import akka.actor.{ActorRef, ActorSystem, Terminated}
 import akka.cluster.Cluster
 import akka.cluster.sharding.{ClusterSharding, ClusterShardingSettings}
 import akka.persistence.fsm.PersistentFSM.{CurrentState, SubscribeTransitionCallBack, Transition}
 import akka.testkit.{TestKit, TestProbe}
 import org.scalatest.{BeforeAndAfterAll, Matchers, WordSpecLike}
-import wallet.persistence.WalletEventStreamMessages.WalletTransactionCompletedEvent
+import wallet.persistence.WalletEventStreamMessages._
 import wallet.services.{CreditScore, CreditVerificationT, WalletCreationNotifierT}
 import wallet.transaction.WalletTransaction.WalletTransactionId
 import wallet.transaction.{InsufficientWalletFunds, InvalidWalletTransaction}
@@ -19,7 +19,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
 /**
-  * Tests consumer of AccountActor behavior
+  * Tests consumer of Wallet behavior
   */
 class WalletPersistentFSMSpec
   extends TestKit(ActorSystem("test-system"))
@@ -57,6 +57,13 @@ class WalletPersistentFSMSpec
       if (lastName.contains("lowScore")) Future.successful(Success(CreditScore(10)))
       else if(lastName.contains("errorScore")) Future.successful(Failure(new Exception("You broke buddy")))
       else if(lastName.contains("failedScore")) Future.failed(new Exception("Service is down"))
+      else if(lastName.contains("timeoutScore")) {
+        implicit val context = system.dispatcher
+        Future {
+          Thread.sleep(10000)
+          Success(CreditScore(101))
+        }
+      }
       else Future.successful(Success(CreditScore(200)))
     }
   }
@@ -71,6 +78,7 @@ class WalletPersistentFSMSpec
   }
 
   def generateTransactionId: WalletTransactionId = UUID.randomUUID().toString
+  def generateAccountNumber: WalletTransactionId = UUID.randomUUID().toString
 
   val walletCreationNotifier = TestProbe()
 
@@ -138,14 +146,17 @@ class WalletPersistentFSMSpec
 
     "have unique name for each wallet state" in {
 
-      val stateNames = Set(WalletPendingCreationState.identifier, WalletInactiveState.identifier, WalletActiveState.identifier)
+      val stateNames = Set(
+        WalletPendingCreationState.identifier,
+        WalletInactiveState.identifier,
+        WalletActiveState.identifier)
       stateNames.size === 3
     }
   }
 
   "User with high credit score" should {
 
-    val accNumber = "1234"
+    val accNumber = generateAccountNumber
     val name = "Big"
     val lastName = "Lebowski"
 
@@ -208,43 +219,61 @@ class WalletPersistentFSMSpec
     }
 
     // Default configuration is to passivate after 5 second
-    /*"publish AccountPassivatedEvent when timeout is reached" in {
+    "publish WalletPassivatedEvent when timeout is reached" in {
 
       val test = TestProbe()
       system.eventStream.subscribe(
         test.ref,
-        classOf[AccountPassivatedEvent])
-      test.expectMsgType[AccountPassivatedEvent](7.seconds)
+        classOf[WalletPassivatedEvent])
+      test.fishForMessage(7.seconds) {
+        case WalletPassivatedEvent(currentAccNumber) => currentAccNumber == accNumber
+      }
     }
 
     "successfully recover after being passivated" in {
 
       val test = TestProbe()
-      accountRegion.tell(GetCurrentBalance(walletDetails.accNumber), test.ref)
-      test.expectMsgPF() { case Success(balance) =>
-        balance === 2
-      }
-    }*/
+      accountRegion.tell(GetCurrentWalletBalance(accNumber), test.ref)
+      test.expectMsg(2.0)
+    }
   }
 
-  /*"AccountActor with a lot of activity " should {
+  "Wallet with a lot of activity " should {
 
-    "publish AccountTakeSnapshotEvent when interval elapses" in {
+    "not passivate after passivate timeout elapses" in {
 
-      val accNumber = "4321"
+      val accNumber = generateAccountNumber
       accountRegion ! CreateWallet(accNumber, "Last", "Samurai-highScore")
       val test = TestProbe()
       system.eventStream.subscribe(
         test.ref,
-        classOf[AccountTakeSnapshotEvent])
-      (1 to 100).foreach(accountRegion ! IncreaseBalance(accNumber, _, generateTransactionId))
-      test.expectMsgType[AccountTakeSnapshotEvent](6.seconds)
+        classOf[WalletPassivatedEvent])
+      (1 to 100000).foreach(accountRegion ! IncreaseWalletBalance(accNumber, _, generateTransactionId))
+      val received = test.receiveWhile(8.seconds) {
+        case w@WalletPassivatedEvent(`accNumber`) => w
+      }
+      received.size === 0
     }
-  }*/
 
-  "AccountActor with low credit score" should {
+    /*"publish WalletSnapshotTakenEvent when interval elapses" in {
 
-    val accNumber = "5678"
+      val accNumber = generateAccountNumber
+      accountRegion ! CreateWallet(accNumber, "Pink", "Panther-highScore")
+      val test = TestProbe()
+      system.eventStream.subscribe(
+        test.ref,
+        classOf[WalletSnapshotTakenEvent])
+      (1 to 10000).foreach(accountRegion ! IncreaseWalletBalance(accNumber, _, generateTransactionId))
+      test.expectMsgPF(6.seconds){
+        case WalletBalanceIncreased || WalletSnapshotTakenEvent(`accNumber`) =>
+      }
+      test.expectMsgType[WalletSnapshotTakenEvent](6.seconds)
+    }*/
+  }
+
+  "Wallet with low credit score" should {
+
+    val accNumber = generateAccountNumber
     val name = "Harry"
     val lastName = "Potter-lowScore"
 
@@ -296,9 +325,9 @@ class WalletPersistentFSMSpec
     }
   }
 
-  "AccountActor with error credit score" should {
+  "Wallet with error credit score" should {
 
-    val accNumber = "7390"
+    val accNumber = generateAccountNumber
     val name = "Bloody"
     val lastName = "Mary-errorScore"
 
@@ -350,9 +379,9 @@ class WalletPersistentFSMSpec
     }
   }
 
-  "AccountActor that got fail while calling credit score check" should {
+  "Wallet that got fail while calling credit score check" should {
 
-    val accNumber = "5279"
+    val accNumber = generateAccountNumber
     val name = "Donald"
     val lastName = "Duck-failedScore"
 
@@ -369,17 +398,38 @@ class WalletPersistentFSMSpec
       fsmRef.tell(CreateWallet(accNumber, name, lastName), test.ref)
       test.expectMsg(CurrentState(fsmRef, WalletPendingCreationState, None))
       test.expectMsgPF() {
-        case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber === accNumber =>
+        case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber == accNumber =>
       }
       test.expectMsg(Transition(fsmRef, WalletPendingCreationState, WalletInactiveState, None))
     }
-
   }
 
-  "AccountActor with good credit score" should {
+  "Wallet that got timeout while calling credit score check" should {
 
-    val walletA = BasicWallet("2193", "Jerry", "Cook")
-    val walletB = BasicWallet("2194", "Thomas", "Cay")
+    val accNumber = generateAccountNumber
+    val name = "Forrest"
+    val lastName = "Gump-timeoutScore"
+
+    "successfully acknowledge a `create account` request and passivate" in {
+
+      val test = TestProbe()
+      accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
+      test.expectMsgPF() {
+        case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber == accNumber =>
+      }
+      system.eventStream.subscribe(
+        test.ref,
+        classOf[WalletPassivatedEvent])
+      test.fishForMessage(8.seconds) {
+        case WalletPassivatedEvent(currentAccNumber) => currentAccNumber == accNumber
+      }
+    }
+  }
+
+  "Wallet with good credit score" should {
+
+    val walletA = BasicWallet(generateAccountNumber, "Jerry", "Cook")
+    val walletB = BasicWallet(generateAccountNumber, "Thomas", "Cay")
     val transactionId = generateTransactionId
     val balanceA = 12.0
     val moveAmount = 5.5
@@ -432,6 +482,27 @@ class WalletPersistentFSMSpec
       test.expectMsg(balanceA - moveAmount)
       accountRegion.tell(GetCurrentWalletBalance(walletB.accNumber), test.ref)
       test.expectMsg(moveAmount)
+    }
+  }
+
+  "EmptyWallet" should {
+
+    val fsmRef = system.actorOf(WalletPersistentFSM.props(
+      new TestAccountVerification,
+      new ClusterWalletRefProvider,
+      new WalletCreationNotifier(walletCreationNotifier.ref)))
+
+    // Default configuration is to passivate after 5 second
+    "publish WalletPassivatedEvent when timeout is reached and stop itself" in {
+
+      val test = TestProbe()
+      test.watch(fsmRef)
+      system.eventStream.subscribe(
+        test.ref,
+        classOf[WalletPassivatedEvent])
+      test.fishForMessage(7.second) {
+        case Terminated(actorRef) => actorRef.path == fsmRef.path
+      }
     }
   }
 }
