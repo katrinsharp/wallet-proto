@@ -1,6 +1,7 @@
 package wallet.persistence
 
 import java.io.File
+import java.lang.Exception
 import java.util.UUID
 
 import akka.actor.{ActorRef, ActorSystem, Terminated}
@@ -51,10 +52,13 @@ class WalletPersistentFSMSpec
         throw new Exception(s"Unable to delete ${file.getAbsolutePath}")
   }
 
+  val LOW_SCORE = 10
+  val HIGH_SCORE = 200
+
   class TestAccountVerification extends CreditVerificationT {
 
     override def getCreditCheck(name: String, lastName: String): Future[Try[CreditScore]] = {
-      if (lastName.contains("lowScore")) Future.successful(Success(CreditScore(10)))
+      if (lastName.contains("lowScore")) Future.successful(Success(CreditScore(LOW_SCORE)))
       else if(lastName.contains("errorScore")) Future.successful(Failure(new Exception("You broke buddy")))
       else if(lastName.contains("failedScore")) Future.failed(new Exception("Service is down"))
       else if(lastName.contains("timeoutScore")) {
@@ -64,7 +68,7 @@ class WalletPersistentFSMSpec
           Success(CreditScore(101))
         }
       }
-      else Future.successful(Success(CreditScore(200)))
+      else Future.successful(Success(CreditScore(HIGH_SCORE)))
     }
   }
 
@@ -174,6 +178,7 @@ class WalletPersistentFSMSpec
       test.expectMsgPF() {
         case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber == accNumber =>
       }
+      walletCreationNotifier.expectMsg(accNumber -> Success(()))
     }
 
     "successfully increase balance" in {
@@ -290,6 +295,9 @@ class WalletPersistentFSMSpec
       accountRegion.tell(CreateWallet(accNumber, name, lastName), test.ref)
       test.expectMsgPF() {
         case WalletCreationRequestAcknowledged(wallet) if wallet.accNumber === accNumber =>
+      }
+      walletCreationNotifier.expectMsgPF() {
+        case (currentAccNumber: String, f: Try[_]) => currentAccNumber == accNumber && f.isFailure
       }
     }
 
@@ -493,13 +501,10 @@ class WalletPersistentFSMSpec
       new WalletCreationNotifier(walletCreationNotifier.ref)))
 
     // Default configuration is to passivate after 5 second
-    "publish WalletPassivatedEvent when timeout is reached and stop itself" in {
+    "stop itself when timeout" in {
 
       val test = TestProbe()
       test.watch(fsmRef)
-      system.eventStream.subscribe(
-        test.ref,
-        classOf[WalletPassivatedEvent])
       test.fishForMessage(7.second) {
         case Terminated(actorRef) => actorRef.path == fsmRef.path
       }

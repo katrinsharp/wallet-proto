@@ -146,25 +146,25 @@ class WalletPersistentFSM(
 
   when(WalletPendingCreationState, passivateTimeout) {
     case Event(CreateWallet(accNumber, name, lastName), EmptyWallet) =>
-      accVerifier.getCreditCheck(name = name, lastName = lastName)
-        .recover{case ex => Failure(ex)}.pipeTo(self)
       val ev = WalletCreationRequestAcknowledged(BasicWallet(accNumber, name, lastName))
-      stay.applying(ev).replying(ev)
+      stay.applying(ev).replying(ev).andThen {
+        case _ =>  accVerifier.getCreditCheck(name = name, lastName = lastName)
+          .recover{case ex => Failure(ex)}.pipeTo(self)
+      }
     case Event(Success(score: CreditScore), currentWallet: BasicWallet) if score.score > 100 =>
-        walletCreationNotifier.notifySuccess(currentWallet.accNumber)
         goto(WalletActiveState)
-          .applying(WalletCreated(ActiveWallet(currentWallet, score)))
+          .applying(WalletCreated(ActiveWallet(currentWallet, score))).andThen {
+          case _ => walletCreationNotifier.notifySuccess(currentWallet.accNumber)
+        }
     case Event(Success(score: CreditScore), currentWallet: BasicWallet) =>
       val reason = s"Score is too low: ${score.score}"
-      walletCreationNotifier.notifyFailure(currentWallet.accNumber, reason)
       goto(WalletInactiveState)
-        .applying(WalletCreated(InactiveWallet(currentWallet, score, reason)))
+        .applying(WalletCreated(InactiveWallet(currentWallet, score, reason))).andThen {
+          _ => walletCreationNotifier.notifyFailure(currentWallet.accNumber, reason)
+        }
     case Event(Failure(ex), currentWallet: BasicWallet) =>
       goto(WalletInactiveState)
         .applying(WalletCreated(InactiveWallet(currentWallet, CreditScore.empty, ex.getMessage)))
-    //case Event(Status.Failure(ex), currentWallet: Wallet)  =>
-    //  goto(WalletInactiveState)
-    //    .applying(WalletCreated(InactiveWallet(currentWallet, CreditScore.empty, ex.getMessage)))
     case Event(StateTimeout, w) =>
       //TODO: ReceiveTimeout is received for empty wallet, but Passivate message gets lost.
       // Doing the alternative route for now, find out why later.
