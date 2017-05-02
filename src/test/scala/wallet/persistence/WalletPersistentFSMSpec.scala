@@ -82,7 +82,7 @@ class WalletPersistentFSMSpec
   }
 
   def generateTransactionId: WalletTransactionId = UUID.randomUUID().toString
-  def generateAccountNumber: WalletTransactionId = UUID.randomUUID().toString
+  def generateAccountNumber: String = UUID.randomUUID().toString
 
   val walletCreationNotifier = TestProbe()
 

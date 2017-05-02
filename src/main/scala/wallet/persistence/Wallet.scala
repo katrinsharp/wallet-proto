@@ -35,7 +35,6 @@ sealed trait WithWalletBalance {
 }
 
 //NOTE: Not thread-safe
-//TODO: UGLY!!!
 trait WalletTransactions {
 
   private[this] var transactions: Map[WalletTransactionId, WalletTransaction] =
